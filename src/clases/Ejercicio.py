@@ -1,9 +1,30 @@
 import logging
 import time
+from queue import Queue
+from threading import Thread
 
 import boto3
 
-logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger(__name__)
+
+
+class GetTagWorker(Thread):
+
+    def __init__(self, queue, result, sqs):
+        super().__init__()
+        self.queue = queue
+        self.result = result
+        self.sqs = sqs
+
+
+    def run(self):
+        while True:
+            url = self.queue.get()
+            try:
+                tags = self.sqs.list_queue_tags(QueueUrl=url)
+                self.result[url.split('/')[4]] = tags
+            finally:
+                self.queue.task_done()
 
 
 def check_no_tags(d):
@@ -15,19 +36,46 @@ def check_no_tags(d):
     print('no tags {}'.format(len(no_tags)))
 
 
-if "__main__" == __name__:
+def timming(f):
+    def some_function(*args, **kwargs):
+        t1 = time.time()
+        aux = f(*args, **kwargs)
+        print(f"{f.__name__} se demoro {time.time() - t1}")
+        return aux
+
+    return some_function
+
+
+@timming
+def get_queue_list(sqs):
+    return sqs.list_queues()
+
+
+@timming
+def get_tags(queues, sqs):
+    for url in queues:
+        tags = sqs.list_queue_tags(QueueUrl=url)
+        yield url, tags
+
+
+def get_queue_by_filter(tags, filter):
+    return {key: value for (key, value) in tags if filter(key, value)}
+
+
+@timming
+def main():
     sqs = boto3.client('sqs')
 
     # List SQS queues
 
-    t1 = time.time()
+    thread_queue = Queue()
+    queues = get_queue_list(sqs)
 
-    queues = sqs.list_queues()
+    for url in queues.get('QueueUrls'):
+        thread_queue.put(url)
 
-    print(f"get queues from sqs {t1 - time.time()}")
-
-    t1 = time.time()
     result = {}
+
     dev_queues = {}
     cl_queues = {}
     mx_queues = {}
@@ -42,28 +90,25 @@ if "__main__" == __name__:
     no_tag_queues = {}
     others_queues = {}
 
-    for i in queues.get('QueueUrls'):
-        tags = sqs.list_queue_tags(QueueUrl=i)
-        result[i.split('/')[4]] = tags.get('Tags')
+    for i in range(10):
+        thread = GetTagWorker(thread_queue, result, sqs)
+        thread.daemon = True
+        thread.start()
+
+    thread_queue.join()
+
+    dev_queues = get_queue_by_filter(result.items(), lambda key, value: key.find('dev-') == 0)
+    cl_queues = get_queue_by_filter(result.items(),
+                                    lambda key, value: key.find('-cl-') != -1 and not (key.find('dev') == 0))
+
+    mx_queues = get_queue_by_filter(result.items(),
+                                    lambda key, value: key.find('-mx-') != -1 and not (key.find('dev') == 0))
+
+    col_queues = get_queue_by_filter(result.items(),
+                                     lambda key, value: key.find('-co-') != -1 and not (key.find('dev') == 0))
 
     for key, value in result.items():
-        if key.find('dev-') == 0:
-            dev_queues[key] = value
-
-    for key, value in result.items():
-        if key.find('-cl-') != -1 and not (key.find('dev') == 0):
-            cl_queues[key] = value
-
-    for key, value in result.items():
-        if key.find('-mx-') != -1 and not (key.find('dev') == 0):
-            mx_queues[key] = value
-
-    for key, value in result.items():
-        if key.find('-col-') != -1 and not (key.find('dev') == 0):
-            col_queues[key] = value
-
-    for key, value in result.items():
-        if key.find('-arg-') != -1 and not (key.find('dev') == 0):
+        if key.find('-ar-') != -1 and not (key.find('dev') == 0):
             arg_queues[key] = value
 
     for key, value in result.items():
@@ -102,8 +147,6 @@ if "__main__" == __name__:
                 and key.find('-co-') == -1 \
                 and key.find('-mx-') == -1:
             others_queues[key] = value
-
-    print(f" processing time =  {t1 - time.time()}")
 
     print("Total {}".format(len(result)))
 
@@ -144,3 +187,7 @@ if "__main__" == __name__:
     print("all = {} ".format(
         (len(dev_queues) + len(cl_queues)) + len(arg_queues) + len(col_queues) + len(ec_queues) + len(es_queues) + len(
             br_queues) + len(mx_queues) + len(pe_queues) + len(pa_queues) + len(others_queues)))
+
+
+if "__main__" == __name__:
+    main()
