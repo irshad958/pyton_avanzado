@@ -1,0 +1,9 @@
+def checkIfDuplicates_2(listOfElems):
+    ''' Check if given list contains any duplicates '''    
+    setOfElems = set()
+    for elem in listOfElems:
+        if elem in setOfElems:
+            return True
+        else:
+            setOfElems.add(elem)         
+    return False
